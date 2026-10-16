@@ -204,7 +204,7 @@ button:disabled { opacity: 0.6; }
 
 .facts div {
   display: grid;
-  grid-template-columns: 4.6rem 1fr;
+  grid-template-columns: 5.4rem 1fr;
   gap: 8px;
   padding: 8px 0;
   border-top: 1px solid var(--line);
@@ -226,6 +226,61 @@ button:disabled { opacity: 0.6; }
   color: var(--banner-ink);
   border-radius: 14px;
 }
+
+.day-block { margin-top: 0; }
+
+.day-block > .lead { margin-bottom: 12px; }
+
+.strategy-value,
+.slow-value {
+  margin: 4px 0 6px;
+  font-family: var(--serif);
+  line-height: 1;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+}
+
+.strategy-value { font-size: 2.15rem; }
+
+.slow-value { font-size: 1.7rem; }
+
+.lines { display: grid; gap: 8px; margin-top: 10px; }
+
+.coin-line {
+  margin: 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.blurb { margin: 10px 0 0; }
+
+.guardrail {
+  margin: 12px 0 0;
+  color: var(--muted);
+}
+
+.slow-card { margin-top: 12px; }
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.chip {
+  min-height: 44px;
+  border-radius: 999px;
+  padding: 8px 12px;
+}
+
+.chip.on {
+  background: var(--ink);
+  color: var(--bg);
+  border-color: var(--ink);
+}
+
+.benchmark .comparison { font-weight: 500; }
 
 .empty p { margin: 0; }
 

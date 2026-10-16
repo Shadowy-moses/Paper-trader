@@ -1,7 +1,5 @@
-// Moving-average crossover with a stop-loss.
-//
-// This is the only strategy. To swap it later, replace this file or point
-// js/main.js at another module that exports createStrategy(config).
+// Slower comparison strategy: a 24-hour / 72-hour crossover with a 4% stop.
+// The day-trading signals live in day-strategies.js and do not use this file.
 //
 // createStrategy(config) returns:
 //   summary: string shown on the page
@@ -73,7 +71,7 @@ export function createStrategy(config) {
 
   return {
     id: "ma-crossover-stop",
-    name: "Moving-average crossover",
+    name: "Slower crossover",
     summary: strategySummary(config),
     stopPrice(fillPrice) {
       return fillPrice * (1 - config.stopLossFraction);
