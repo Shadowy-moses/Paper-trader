@@ -3,6 +3,7 @@
 // public prices, then rebuilds the same paper trades.
 
 export const HOUR_MS = 60 * 60 * 1000;
+export const QUARTER_HOUR_MS = 15 * 60 * 1000;
 
 // Midnight at the start of launch day in America/Chicago.
 // October 16, 2026 is still on daylight time (UTC−5), so midnight is 05:00 UTC.
@@ -32,6 +33,28 @@ export const CONFIG = {
     { id: "ETH", name: "Ethereum", binanceSymbol: "ETHUSDT", coinbaseProduct: "ETH-USD" },
     { id: "SOL", name: "Solana", binanceSymbol: "SOLUSDT", coinbaseProduct: "SOL-USD" },
   ],
+  // Short-term signals use 15-minute candles. Each signal has its own $100.
+  // Indicators may look at earlier candles so they exist at midnight, but no
+  // buy is placed before startTime. Numbers below are the Ledger rules.
+  day: {
+    candleMinutes: 15,
+    breakoutLookback: 20,
+    volumeMultiple: 1.5,
+    atrPeriod: 14,
+    stopAtr: 1.5,
+    targetAtr: 3,
+    fastEma: 20,
+    slowEma: 50,
+    rsiPeriod: 14,
+    rsiPullback: 40,
+    rsiOversold: 25,
+    bounceSma: 20,
+    bounceStopFraction: 0.01,
+    // A stop-out may cost at most this share of that strategy's balance.
+    riskFraction: 0.02,
+    // After this many losing sells in one Chicago day, no more buys until tomorrow.
+    maxLossesPerDay: 3,
+  },
 };
 
 export function assertConfig(config) {
@@ -66,5 +89,12 @@ export function assertConfig(config) {
   }
   if (!ids.has("BTC")) {
     throw new Error("Keep a coin with id BTC so the buy-and-hold comparison has Bitcoin.");
+  }
+  const day = config.day;
+  if (!day || day.candleMinutes !== 15) throw new Error("Day trades use 15-minute candles.");
+  if (!(day.slowEma > day.fastEma)) throw new Error("The slow average must be longer than the fast one.");
+  if (!(day.riskFraction > 0 && day.riskFraction < 1)) throw new Error("riskFraction must be between 0 and 1.");
+  if (!Number.isInteger(day.maxLossesPerDay) || day.maxLossesPerDay < 1) {
+    throw new Error("maxLossesPerDay must be a positive whole number.");
   }
 }

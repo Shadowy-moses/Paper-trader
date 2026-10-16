@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
-import { CONFIG, START_TIME } from "../js/config.js";
+import { CONFIG, QUARTER_HOUR_MS, START_TIME } from "../js/config.js";
+import { createDayStrategies } from "../js/day-strategies.js";
 import { formatChicago } from "../js/format.js";
-import { runPaperAccount } from "../js/engine.js";
+import { runBenchmark, runPaperAccount, runRiskAccount } from "../js/engine.js";
 import { createStrategy } from "../js/strategy.js";
 import { buildViewModel } from "../js/view-model.js";
 import { bars, testConfig } from "./helpers.js";
@@ -16,6 +17,9 @@ describe("launch settings", () => {
     assert.equal(CONFIG.startingCash, 100);
     assert.equal(CONFIG.feeRate, 0.001);
     assert.equal(CONFIG.slippageRate, 0.0005);
+    assert.equal(CONFIG.day.candleMinutes, 15);
+    assert.equal(CONFIG.day.riskFraction, 0.02);
+    assert.equal(CONFIG.day.maxLossesPerDay, 3);
     assert.deepEqual(
       CONFIG.coins.map((coin) => coin.id),
       ["BTC", "ETH", "SOL"],
@@ -33,46 +37,88 @@ describe("launch settings", () => {
   });
 });
 
+function quarterFlat(count, price = 100) {
+  return Array.from({ length: count }, (_, index) => {
+    const openTime = index * QUARTER_HOUR_MS;
+    return {
+      openTime,
+      closeTime: openTime + QUARTER_HOUR_MS,
+      open: price,
+      high: price + 1,
+      low: price - 1,
+      close: price,
+      volume: 10,
+    };
+  });
+}
+
+function viewFrom(config, hourly, quarter) {
+  const dayAccounts = createDayStrategies(config).map((strategy) =>
+    runRiskAccount({ candlesByCoin: quarter, config, strategy }),
+  );
+  const slowAccount = runPaperAccount({
+    candlesByCoin: hourly,
+    config,
+    strategy: createStrategy(config),
+  });
+  const benchmark = runBenchmark({
+    candles: quarter.BTC,
+    config,
+    startMs: Date.parse(config.startTime),
+  });
+  return buildViewModel({
+    dayAccounts,
+    slowAccount,
+    benchmark,
+    sourceLabel: "Binance public prices",
+    config,
+  });
+}
+
 describe("dashboard copy", () => {
-  test("shows balance, profit, the Bitcoin comparison, and an empty log", () => {
-    const config = testConfig({ fastHours: 3, slowHours: 5 });
-    const account = runPaperAccount({
-      candlesByCoin: { BTC: bars(Array(6).fill(100)) },
+  test("shows the three day strategies, Bitcoin, and the slower comparison", () => {
+    const config = testConfig({ fastHours: 24, slowHours: 72 });
+    const view = viewFrom(
       config,
-      strategy: createStrategy(config),
-    });
-    const view = buildViewModel({
-      account,
-      sourceLabel: "Binance public prices",
-      config,
-    });
-    assert.equal(view.balance, "$100.00");
-    assert.match(view.pnlText, /Even since/);
+      { BTC: bars(Array(6).fill(100)) },
+      { BTC: quarterFlat(6) },
+    );
+    assert.deepEqual(view.day.map((strategy) => strategy.name), [
+      "Momentum breakout",
+      "Trend pullback",
+      "Oversold bounce",
+    ]);
+    assert.equal(view.day[0].balance, "$100.00");
+    assert.match(view.day[0].activity, /0 trades/);
+    assert.match(view.day[0].activity, /\$0\.00 in fees/);
+    assert.match(view.day[0].coins[0].line, /Bitcoin · no trades/);
+    assert.match(view.guardrail, /2%/);
+    assert.match(view.guardrail, /3 losses/);
+    assert.match(view.guardrail, /midnight Central time/);
     assert.match(view.benchmarkBalance, /\$99\./);
-    assert.match(view.benchmarkPnlText, /Down/);
-    assert.match(view.comparison, /Ahead of just holding Bitcoin/);
+    assert.match(view.benchmarkComparisons[0], /Momentum breakout is ahead of just holding Bitcoin/);
+    assert.match(view.slow.how, /24-hour average/);
     assert.equal(view.trades.length, 0);
-    assert.match(view.emptyTrades, /time \(Central time, Chicago\), coin, side, price, size, and reason/);
-    assert.match(view.how, /does not borrow/);
-    assert.match(view.asOf, /Binance public prices/);
+    assert.match(view.emptyTrades, /time, strategy, coin, side, price, size, and reason/);
+    assert.deepEqual(view.filters.map((item) => item.label), ["All", "Breakout", "Pullback", "Bounce", "Slower"]);
   });
 
-  test("a trade log row has time, coin, side, price, size, and reason", () => {
+  test("a trade log row has time, strategy, coin, side, price, size, and reason", () => {
     const config = testConfig();
-    const account = runPaperAccount({
-      candlesByCoin: { BTC: bars([10, 10, 10, 10, 14]) },
+    const view = viewFrom(
       config,
-      strategy: createStrategy(config),
-    });
-    const view = buildViewModel({ account, sourceLabel: "Binance public prices", config });
+      { BTC: bars([10, 10, 10, 10, 14]) },
+      { BTC: quarterFlat(4, 10) },
+    );
     assert.equal(view.trades.length, 1);
     const trade = view.trades[0];
     assert.equal(trade.side, "Buy");
+    assert.equal(trade.strategyName, "Slower crossover");
     assert.equal(trade.coin, "Bitcoin");
     assert.match(trade.time, /CDT|CST/);
     assert.match(trade.price, /^\$/);
     assert.match(trade.size, /BTC$/);
     assert.match(trade.reason, /crossed above/);
-    assert.equal(view.pnlDirection, "down");
+    assert.equal(view.slow.pnlDirection, "down");
   });
 });

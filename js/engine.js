@@ -1,7 +1,9 @@
 // Rebuilds the paper account from finished hourly candles.
 // Same candles in, same trades out. Nothing is stored on the phone.
 
+import { chicagoDateKey, isChicagoMidnight } from "./chicago.js";
 import { assertConfig } from "./config.js";
+import { buySpend, sizeForStop } from "./risk.js";
 import { createStrategy } from "./strategy.js";
 
 export function splitCash(total, count) {
@@ -78,6 +80,8 @@ function runSleeve({ coin, order, candles, cash, config, strategy, startMs }) {
         size: fill.qty,
         fee: fill.fee,
         reason: decision.reason,
+        strategyId: strategy.id,
+        strategyName: strategy.name,
       });
       sequence += 1;
       continue;
@@ -105,6 +109,8 @@ function runSleeve({ coin, order, candles, cash, config, strategy, startMs }) {
         size: soldQty,
         fee: fill.fee,
         reason: decision.reason,
+        strategyId: strategy.id,
+        strategyName: strategy.name,
       });
       sequence += 1;
     }
@@ -170,6 +176,216 @@ export function runBenchmark({ candles, config, startMs }) {
     size: fill.qty,
     lastPrice: last.close,
     waiting: false,
+  };
+}
+
+function markPrice(positions, lastPrice, id) {
+  return lastPrice[id] ?? null;
+}
+
+function accountEquity(cash, coins, positions, lastPrice) {
+  let total = cash;
+  for (const coin of coins) {
+    const position = positions[coin.id];
+    if (!position) continue;
+    const price = markPrice(positions, lastPrice, coin.id);
+    if (price == null) return null;
+    total += position.qty * price;
+  }
+  return total;
+}
+
+function lossesOnDay(trades, dayKey) {
+  return trades.filter((trade) => trade.side === "sell" && trade.loss && trade.dayKey === dayKey).length;
+}
+
+export function runRiskAccount({ candlesByCoin, config, strategy }) {
+  assertConfig(config);
+  const coins = config.coins;
+  const startMs = Date.parse(config.startTime);
+  const ordered = {};
+  const indexByOpen = {};
+  for (const coin of coins) {
+    ordered[coin.id] = orderedCandles(candlesByCoin[coin.id] || []);
+    indexByOpen[coin.id] = new Map(ordered[coin.id].map((bar, index) => [bar.openTime, index]));
+  }
+  const times = [
+    ...new Set(
+      coins.flatMap((coin) => ordered[coin.id].map((bar) => bar.openTime).filter((time) => time >= startMs)),
+    ),
+  ].sort((a, b) => a - b);
+
+  let cash = config.startingCash;
+  const positions = {};
+  const lastPrice = {};
+  const trades = [];
+  let sequence = 0;
+
+  const pushTrade = (trade) => {
+    trades.push({ ...trade, sequence, strategyId: strategy.id, strategyName: strategy.name });
+    sequence += 1;
+  };
+
+  for (const openTime of times) {
+    const exited = new Set();
+    for (const coin of coins) {
+      const index = indexByOpen[coin.id].get(openTime);
+      if (index == null) continue;
+      const candles = ordered[coin.id];
+      const bar = candles[index];
+      lastPrice[coin.id] = bar.close;
+      const position = positions[coin.id];
+      if (!position) continue;
+      const exit = strategy.exit({ candles, index, position, bar });
+      if (!exit || exit.action !== "sell") continue;
+      const fill = sellAll({
+        qty: position.qty,
+        rawPrice: exit.rawPrice,
+        feeRate: config.feeRate,
+        slippageRate: config.slippageRate,
+      });
+      if (!fill) continue;
+      const proceeds = fill.cash;
+      cash += proceeds;
+      pushTrade({
+        time: bar.closeTime,
+        coinId: coin.id,
+        coinName: coin.name,
+        coinOrder: coins.indexOf(coin),
+        side: "sell",
+        price: fill.price,
+        size: position.qty,
+        fee: fill.fee,
+        cost: position.cost,
+        proceeds,
+        loss: proceeds < position.cost - 1e-8,
+        dayKey: chicagoDateKey(bar.openTime),
+        reason: exit.reason,
+      });
+      positions[coin.id] = null;
+      exited.add(coin.id);
+    }
+
+    for (const coin of coins) {
+      const index = indexByOpen[coin.id].get(openTime);
+      if (index == null || positions[coin.id] || exited.has(coin.id)) continue;
+      const candles = ordered[coin.id];
+      const bar = candles[index];
+      if (isChicagoMidnight(bar.closeTime)) continue;
+      const dayKey = chicagoDateKey(bar.openTime);
+      if (lossesOnDay(trades, dayKey) >= config.day.maxLossesPerDay) continue;
+      const equity = accountEquity(cash, coins, positions, lastPrice);
+      if (equity == null) continue;
+      const idea = strategy.entry({ candles, index, bar, day: config.day, equity, cash });
+      if (!idea || !(idea.rawPrice > 0)) continue;
+      const fillPrice = idea.rawPrice * (1 + config.slippageRate);
+      const stopPrice = idea.stopFraction != null
+        ? fillPrice * (1 - idea.stopFraction)
+        : fillPrice - idea.stopOffset;
+      if (!(stopPrice > 0) || !(stopPrice < fillPrice)) continue;
+      const targetPrice = idea.targetMode === "sma20" ? null : fillPrice + idea.targetOffset;
+      if (idea.targetMode !== "sma20" && !(targetPrice > fillPrice)) continue;
+      const sized = sizeForStop({
+        equity,
+        cash,
+        fillPrice,
+        stopPrice,
+        feeRate: config.feeRate,
+        slippageRate: config.slippageRate,
+        riskFraction: config.day.riskFraction,
+      });
+      if (!sized) continue;
+      const bought = buySpend({
+        spend: sized.spend,
+        rawPrice: idea.rawPrice,
+        feeRate: config.feeRate,
+        slippageRate: config.slippageRate,
+      });
+      if (!bought) continue;
+      cash -= sized.spend;
+      positions[coin.id] = {
+        qty: bought.qty,
+        entryPrice: bought.price,
+        stopPrice,
+        targetPrice,
+        targetMode: idea.targetMode || "fixed",
+        cost: sized.spend,
+        stopReason: idea.stopReason,
+        targetReason: idea.targetReason,
+      };
+      pushTrade({
+        time: bar.closeTime,
+        coinId: coin.id,
+        coinName: coin.name,
+        coinOrder: coins.indexOf(coin),
+        side: "buy",
+        price: bought.price,
+        size: bought.qty,
+        fee: bought.fee,
+        cost: sized.spend,
+        proceeds: 0,
+        loss: false,
+        dayKey,
+        reason: idea.reason,
+      });
+    }
+  }
+
+  const coinReports = coins.map((coin) => {
+    const candles = ordered[coin.id];
+    const last = candles.at(-1) || null;
+    const position = positions[coin.id] || null;
+    const price = last ? last.close : null;
+    const marketValue = position && price != null ? position.qty * price : 0;
+    const coinTrades = trades.filter((trade) => trade.coinId === coin.id);
+    const realized = coinTrades
+      .filter((trade) => trade.side === "sell")
+      .reduce((sum, trade) => sum + (trade.proceeds - trade.cost), 0);
+    const unrealized = position ? marketValue - position.cost : 0;
+    const index = candles.length - 1;
+    const dayKey = last && last.openTime >= startMs ? chicagoDateKey(last.openTime) : null;
+    const blocked = dayKey != null && lossesOnDay(trades, dayKey) >= config.day.maxLossesPerDay;
+    const status = strategy.status({
+      candles,
+      index,
+      position,
+      blocked,
+    });
+    return {
+      id: coin.id,
+      name: coin.name,
+      pnl: realized + unrealized,
+      fees: coinTrades.reduce((sum, trade) => sum + trade.fee, 0),
+      tradeCount: coinTrades.length,
+      qty: position ? position.qty : 0,
+      status: status.text,
+      lastCloseTime: last ? last.closeTime : null,
+      candleCount: candles.filter((bar) => bar.openTime >= startMs).length,
+    };
+  });
+
+  const equity = coinReports.reduce((sum, coin) => {
+    const position = positions[coin.id];
+    const price = lastPrice[coin.id];
+    return sum + (position && price != null ? position.qty * price : 0);
+  }, cash);
+  const closeTimes = coinReports.map((coin) => coin.lastCloseTime).filter((time) => time != null);
+
+  return {
+    id: strategy.id,
+    name: strategy.name,
+    blurb: strategy.blurb || "",
+    startingCash: config.startingCash,
+    equity,
+    pnl: equity - config.startingCash,
+    cash,
+    invested: equity - cash,
+    feesPaid: trades.reduce((sum, trade) => sum + trade.fee, 0),
+    tradeCount: trades.length,
+    candleCount: coinReports.length ? Math.min(...coinReports.map((coin) => coin.candleCount)) : 0,
+    lastCloseTime: closeTimes.length ? Math.min(...closeTimes) : null,
+    coins: coinReports,
+    trades,
   };
 }
 
