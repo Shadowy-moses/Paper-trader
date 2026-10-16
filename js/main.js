@@ -67,7 +67,7 @@ function render(view, errorMessage) {
     ]),
   );
 
-  content.replaceChildren(
+  const nodes = [
     errorMessage ? h("p", { className: "banner", role: "alert", text: errorMessage }) : null,
     h("section", { className: "card balance", "aria-labelledby": "balance-label" }, [
       h("p", { className: "label", id: "balance-label", text: "Fake balance" }),
@@ -120,7 +120,8 @@ function render(view, errorMessage) {
       ),
     ]),
     h("p", { className: "meta", id: "as-of", text: view.asOf }),
-  );
+  ];
+  content.replaceChildren(...nodes.filter(Boolean));
 }
 
 async function load() {
